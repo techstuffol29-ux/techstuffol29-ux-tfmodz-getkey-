@@ -534,6 +534,7 @@ const GITLAB_CONFIG = {
 
 const WAIT_SECONDS     = 3;
 const KEY_VALIDITY_MS  = 24 * 60 * 60 * 1000;
+const COOLDOWN_MS      = 2 * 60 * 60 * 1000;   // ২ ঘন্টা: এর মধ্যে একই ডিভাইস পুরনো key-ই পাবে
 const FREE_USERNAME    = "Free User";
 const FREE_TYPE        = "free";
 
@@ -620,6 +621,25 @@ async function pushConfig(payload) {
 }
 
 /* =========================================================
+ *  DEVICE ID (localStorage + cookie দুই জায়গায় রাখা হয়)
+ * ========================================================= */
+function getDeviceId() {
+    let id = '';
+    try { id = localStorage.getItem('tf_dev') || ''; } catch (e) {}
+    if (!id) {
+        const m = document.cookie.match(/(?:^|; )tf_dev=([^;]+)/);
+        if (m) id = m[1];
+    }
+    if (!id) {
+        id = (crypto.randomUUID ? crypto.randomUUID()
+              : Date.now().toString(36) + Math.random().toString(36).slice(2));
+    }
+    try { localStorage.setItem('tf_dev', id); } catch (e) {}
+    document.cookie = 'tf_dev=' + id + '; max-age=31536000; path=/; SameSite=Lax';
+    return id;
+}
+
+/* =========================================================
  *  KEY GENERATOR
  * ========================================================= */
 function generateKey() {
@@ -677,14 +697,33 @@ async function createKey() {
             console.log('Cleaned ' + cleaned + ' stale keys');
         }
 
+        const devId = getDeviceId();
+        const now = Date.now();
+
+        // ২ ঘন্টার মধ্যে এই ডিভাইসে key বানানো হয়ে থাকলে সেটাই দেখাও
+        let existing = null, existingTime = 0;
+        Object.keys(config.keys).forEach(k => {
+            const e = config.keys[k] || {};
+            if (e.gen_dev === devId && (e.type || 'free') === FREE_TYPE &&
+                (now - (e.created_at || 0)) < COOLDOWN_MS &&
+                (e.created_at || 0) > existingTime) {
+                existing = k; existingTime = e.created_at;
+            }
+        });
+        if (existing) {
+            showLoader(false);
+            displayKey(existing);
+            return;
+        }
+
         let key = '';
         do { key = generateKey(); } while (config.keys[key]);
 
-        const now = Date.now();
         config.keys[key] = {
             device_id:  '',              // bound on first app login
             username:   FREE_USERNAME,   // fixed for free keys
             type:       FREE_TYPE,       // marker for cleanup logic
+            gen_dev:    devId,           // কোন ডিভাইস থেকে generate হয়েছে
             created_at: now,
             expires_at: now + KEY_VALIDITY_MS
         };
@@ -712,7 +751,7 @@ function displayKey(key) {
     setStatus('Key generated — auto-copied', 'success');
     toast('Key copied to clipboard');
     copyToClipboard(key);
-    try { sessionStorage.setItem('tf_key', key); } catch (e) {}
+    try { localStorage.setItem('tf_last', JSON.stringify({ key: key, ts: Date.now() })); } catch (e) {}
 }
 
 /* =========================================================
@@ -747,21 +786,23 @@ const iv = ACCESS_OK ? setInterval(() => {
 /* start-up: blocked / already generated / normal */
 (function init() {
     if (!ACCESS_OK) { blockPage(); return; }
-    /* নতুন করে শর্টনার দিয়ে ঢুকলে (navigate) → সবসময় নতুন key।
-       শুধু রিফ্রেশ/ব্যাক করলে (reload/back_forward) → আগের key-ই দেখাবে। */
+
+    /* রিফ্রেশ / ব্যাক করলে key কখনো বদলাবে না — সবসময় আগেরটাই দেখাবে।
+       নতুন key শুধু নতুন করে শর্টনার দিয়ে ঢুকলে (এবং ২ ঘন্টা পার হলে) হবে। */
     let navType = 'navigate';
     try {
         const nav = performance.getEntriesByType('navigation')[0];
         if (nav) navType = nav.type;
     } catch (e) {}
+    if (navType === 'navigate') return;
 
-    let saved = null;
     try {
-        if (navType === 'navigate') sessionStorage.removeItem('tf_key');
-        else saved = sessionStorage.getItem('tf_key');
+        const last = JSON.parse(localStorage.getItem('tf_last') || 'null');
+        if (last && last.key && (Date.now() - last.ts) < KEY_VALIDITY_MS) {
+            clearInterval(iv);
+            displayKey(last.key);
+        }
     } catch (e) {}
-
-    if (saved) { clearInterval(iv); displayKey(saved); }
 })();
 
 function setStatus(msg, cls) {
