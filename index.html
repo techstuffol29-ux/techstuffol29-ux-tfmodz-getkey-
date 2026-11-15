@@ -747,8 +747,20 @@ const iv = ACCESS_OK ? setInterval(() => {
 /* start-up: blocked / already generated / normal */
 (function init() {
     if (!ACCESS_OK) { blockPage(); return; }
+    /* নতুন করে শর্টনার দিয়ে ঢুকলে (navigate) → সবসময় নতুন key।
+       শুধু রিফ্রেশ/ব্যাক করলে (reload/back_forward) → আগের key-ই দেখাবে। */
+    let navType = 'navigate';
+    try {
+        const nav = performance.getEntriesByType('navigation')[0];
+        if (nav) navType = nav.type;
+    } catch (e) {}
+
     let saved = null;
-    try { saved = sessionStorage.getItem('tf_key'); } catch (e) {}
+    try {
+        if (navType === 'navigate') sessionStorage.removeItem('tf_key');
+        else saved = sessionStorage.getItem('tf_key');
+    } catch (e) {}
+
     if (saved) { clearInterval(iv); displayKey(saved); }
 })();
 
